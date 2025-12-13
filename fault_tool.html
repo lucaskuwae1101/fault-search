@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fault Code CSV → JSON</title>
+  <style>
+    :root {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    body { margin: 0; padding: 0; }
+    header { padding: 16px 20px; background: linear-gradient(135deg, #0ea5e9, #6366f1); color: #0b1224; }
+    header h1 { margin: 0; font-size: 20px; }
+    main { padding: 16px 20px; display: grid; gap: 12px; grid-template-rows: auto auto 1fr auto; height: calc(100vh - 64px); box-sizing: border-box; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { background: #22c55e; border: none; color: #0b1224; padding: 10px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    button:disabled { background: #334155; color: #94a3b8; cursor: not-allowed; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; box-shadow: 0 6px 14px rgba(0,0,0,0.35); }
+    #info { font-size: 14px; color: #cbd5e1; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; color: #e2e8f0; }
+    th, td { border: 1px solid #1f2937; padding: 6px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    th { position: sticky; top: 0; background: #0b1224; }
+    #table-wrap { overflow: auto; max-height: 380px; }
+    #summary { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; white-space: pre-wrap; color: #cbd5e1; }
+    .pill { display: inline-block; padding: 4px 8px; background: #1f2937; border-radius: 999px; margin-left: 8px; font-size: 12px; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fault Code CSV → JSON <span class="pill">offline</span></h1>
+  </header>
+  <main>
+    <div class="card controls">
+      <label for="preset">Load CSV in this folder:</label>
+      <select id="preset"></select>
+      <button id="loadPreset">Load</button>
+      <span style="margin-left:8px;">or</span>
+      <input type="file" id="file" accept=".csv,text/csv">
+      <button id="convert" disabled>Convert to JSON</button>
+      <div id="info">Load a Terberg or Venti CSV to preview and convert.</div>
+    </div>
+    <div class="card" id="summary">No file loaded.</div>
+    <div class="card" id="table-wrap"><table id="table"><thead></thead><tbody></tbody></table></div>
+  </main>
+
+  <script>
+    const defaultFiles = [
+      "fault codes/fault_code_terberg.csv",
+      "fault codes/fault_code_venti.csv",
+      "fault codes/venti-faultcode.csv",
+      "fault codes/Alerts and Actions(Alerts).csv",
+      "fault codes/faultcodes.csv",
+    ];
+
+    const fileInput = document.getElementById("file");
+    const presetSelect = document.getElementById("preset");
+    const loadPresetBtn = document.getElementById("loadPreset");
+    const convertBtn = document.getElementById("convert");
+    const info = document.getElementById("info");
+    const summary = document.getElementById("summary");
+    const thead = document.querySelector("#table thead");
+    const tbody = document.querySelector("#table tbody");
+
+    let currentData = null;
+    let currentName = null;
+
+    // Populate preset dropdown
+    presetSelect.innerHTML = "";
+    defaultFiles.forEach((f) => {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      presetSelect.appendChild(opt);
+    });
+    const customOpt = document.createElement("option");
+    customOpt.value = "";
+    customOpt.textContent = "Custom file picker…";
+    presetSelect.appendChild(customOpt);
+
+    fileInput.addEventListener("change", async (ev) => {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      currentName = file.name.replace(/\.[^.]+$/, "");
+      info.textContent = `Loading ${file.name}...`;
+      const text = await readFile(file);
+      await handleRawText(text, file.name);
+    });
+
+    loadPresetBtn.addEventListener("click", async () => {
+      const selected = presetSelect.value;
+      if (!selected) {
+        fileInput.click();
+        return;
+      }
+      try {
+        info.textContent = `Loading ${selected}...`;
+        const resp = await fetch(selected, { cache: "no-store" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await resp.text();
+        await handleRawText(text, selected);
+      } catch (err) {
+        const hint = location.protocol === "file:"
+          ? `\nIf running from a file:// URL, browsers block fetch. Use the file picker or run \"python -m http.server\" in this folder and open http://localhost:8000/fault_tool.html.`
+          : "";
+        alert(`Failed to load ${selected}: ${err}${hint}`);
+        info.textContent = `Failed to load ${selected}`;
+      }
+    });
+
+    async function handleRawText(text, name) {
+      const rows = parseCSV(text);
+      if (!rows.length) {
+        info.textContent = "No data found.";
+        return;
+      }
+      const headers = rows[0];
+      const dataRows = rows.slice(1);
+      currentData = rowsToObjects(headers, dataRows);
+      currentName = name.replace(/\.[^.]+$/, "");
+      info.textContent = `Loaded ${name} | rows: ${dataRows.length} | cols: ${headers.length}`;
+      renderTable(headers, dataRows.slice(0, 200));
+      renderSummary(headers, dataRows);
+      convertBtn.disabled = false;
+    }
+
+    convertBtn.addEventListener("click", () => {
+      if (!currentData) return;
+      let normalized;
+      try {
+        normalized = normalizeData(currentData);
+      } catch (err) {
+        alert(`Conversion failed: ${err}`);
+        return;
+      }
+      const blob = new Blob([JSON.stringify(normalized, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${currentName || "fault_codes"}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      alert(`Wrote ${normalized.length} records to ${a.download}`);
+    });
+
+    function readFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error);
+        reader.onload = () => resolve(reader.result);
+        // Use Latin1 to support the Venti file; UTF-8 content still reads fine.
+        reader.readAsText(file, "ISO-8859-1");
+      });
+    }
+
+    // Basic CSV parser with quote handling.
+    function parseCSV(text) {
+      const rows = [];
+      let row = [];
+      let field = "";
+      let inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        const next = text[i + 1];
+        if (inQuotes) {
+          if (c === '"' && next === '"') { field += '"'; i++; continue; }
+          if (c === '"') { inQuotes = false; continue; }
+          field += c;
+        } else {
+          if (c === '"') { inQuotes = true; continue; }
+          if (c === ",") { row.push(field); field = ""; continue; }
+          if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; continue; }
+          if (c === "\r") { continue; }
+          field += c;
+        }
+      }
+      row.push(field);
+      rows.push(row);
+      return rows.filter(r => r.length && !(r.length === 1 && r[0] === ""));
+    }
+
+    function rowsToObjects(headers, rows) {
+      return rows.map(r => {
+        const obj = {};
+        headers.forEach((h, idx) => { obj[h] = r[idx] ?? ""; });
+        return obj;
+      });
+    }
+
+    function renderTable(headers, rows) {
+      thead.innerHTML = "";
+      tbody.innerHTML = "";
+      const tr = document.createElement("tr");
+      headers.forEach(h => {
+        const th = document.createElement("th");
+        th.textContent = h;
+        tr.appendChild(th);
+      });
+      thead.appendChild(tr);
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        headers.forEach((h) => {
+          const td = document.createElement("td");
+          const val = r[headers.indexOf(h)] ?? "";
+          td.textContent = val;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderSummary(headers, rows) {
+      const totals = rows.length;
+      const lines = [];
+      lines.push(`Rows: ${totals}, Columns: ${headers.length}`);
+      lines.push("Columns (first 20):");
+      headers.slice(0, 20).forEach((h, idx) => {
+        let nonNull = 0;
+        const unique = new Set();
+        for (const r of rows) {
+          const v = r[idx];
+          if (v !== undefined && v !== null && String(v).trim() !== "") nonNull++;
+          unique.add(v ?? "");
+        }
+        lines.push(`- ${h}: non-null ${(nonNull / Math.max(totals, 1) * 100).toFixed(1)}% (unique ${unique.size - (unique.has("") ? 1 : 0)})`);
+      });
+      summary.textContent = lines.join("\n");
+    }
+
+    // --- Normalization logic ---
+    const clean = (v) => {
+      if (v === undefined || v === null) return null;
+      const s = String(v).trim();
+      return s === "" ? null : s;
+    };
+
+    const normalizeAlertCode = (v) => {
+      const raw = clean(v);
+      if (raw === null) return null;
+      const num = Number(raw);
+      if (!Number.isNaN(num)) {
+        return Number.isInteger(num) ? String(num) : String(num);
+      }
+      return raw;
+    };
+
+    const joinLabeled = (pairs) => {
+      const parts = [];
+      for (const [label, val] of pairs) {
+        if (val) parts.push(`${label}: ${val}`);
+      }
+      return parts.length ? parts.join("\n") : null;
+    };
+
+    function isTerberg(cols) {
+      return ["SPN", "FMI", "Foutcode", "Omschrijving"].every(c => cols.includes(c));
+    }
+    function isVenti(cols) {
+      return cols.includes("Alert Fault code #");
+    }
+
+    function normalizeTerberg(data) {
+      return data.map(row => {
+        const spn = clean(row["SPN"]);
+        const fmi = clean(row["FMI"]);
+        const foutcode = clean(row["Foutcode"]);
+        const description = clean(row["Omschrijving"]);
+        const codeDisplay = spn && fmi ? `SPN ${spn} FMI ${fmi}` : (spn ? `SPN ${spn}` : null);
+        const searchTerms = new Set([codeDisplay, foutcode, description].filter(Boolean));
+        return {
+          source: "terberg",
+          alert_code: null,
+          spn,
+          fmi,
+          code_display: codeDisplay || foutcode,
+          title: foutcode || codeDisplay,
+          description,
+          severity: clean(row["Categorie"]),
+          category: clean(row["Foutcodelijst"]),
+          action: clean(row["Aangeraden actie"]),
+          cause: clean(row["Oorzaak"]),
+          effect: clean(row["Effect"]),
+          notes: null,
+          color: null,
+          stop_reason: null,
+          rationale: null,
+          search_terms: Array.from(searchTerms).sort(),
+        };
+      });
+    }
+
+    function normalizeVenti(data) {
+      return data.map(row => {
+        const alertCode = normalizeAlertCode(row["Alert Fault code #"]);
+        const title = clean(row["Alert message"]);
+        const description = clean(row["Meaning"]);
+        const action = joinLabeled([
+          ["AVC Action", clean(row["AVC Action"])],
+          ["Remote Operator Action", clean(row[" Remote Operator Action"])],
+          ["Vehicle immediate response", clean(row["Vehicle immediate response"])],
+          ["Ops Troubleshoot Guide", clean(row["Ops Troubleshoot Guide"])],
+        ]);
+        const notes = joinLabeled([
+          ["Notes", clean(row["Notes"])],
+          ["Internal Comments", clean(row["Internal Comments"])],
+        ]);
+        const searchTerms = new Set([alertCode, title, description, clean(row["Associated Reasons"]), clean(row["Categorization"])].filter(Boolean));
+        return {
+          source: "venti",
+          alert_code: alertCode,
+          spn: null,
+          fmi: null,
+          code_display: alertCode,
+          title: title || alertCode,
+          description,
+          severity: clean(row["Severity"]),
+          category: clean(row["Categorization"]),
+          action,
+          cause: clean(row["Associated Reasons"]),
+          effect: clean(row["Vehicle immediate response"]),
+          notes,
+          color: clean(row["Color"]),
+          stop_reason: clean(row["Stop Reason"]),
+          rationale: clean(row["Rationale"]),
+          search_terms: Array.from(searchTerms).sort(),
+        };
+      });
+    }
+
+    function normalizeData(data) {
+      if (!data.length) throw new Error("No data rows found.");
+      const cols = Object.keys(data[0]);
+      if (isTerberg(cols)) return normalizeTerberg(data);
+      if (isVenti(cols)) return normalizeVenti(data);
+      throw new Error("CSV type not recognized (expected Terberg or Venti columns).");
+    }
+  </script>
+</body>
+</html>
